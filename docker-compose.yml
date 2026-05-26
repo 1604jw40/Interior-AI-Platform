@@ -106,6 +106,8 @@ services:
     build:
       context: ./services/matching-engine
     container_name: matching_engine
+    ports:
+      - "8010:8010"
     volumes:
       - ./services/matching-engine/src:/app/src:ro           # 🔥 [추가] 매칭 엔진 소스 코드 실시간 동기화
       - ./shared/schema:/app/schema:rw
@@ -116,7 +118,13 @@ services:
       - DB_USER=admin
       - DB_PASS=secretpassword
       - DB_NAME=interior_assets
+      - DB_PORT=${DB_PORT:-5432}
       - OPENAI_API_KEY=${OPENAI_API_KEY} # 호스트의 환경변수 읽어오기
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      - OPENAI_VECTOR_STORE_ID=${OPENAI_VECTOR_STORE_ID:-}
+      - FIREBASE_STORAGE_BASE_URI=${FIREBASE_STORAGE_BASE_URI:-gs://interiorplatform-d58e0.firebasestorage.app}
+      - PERCEPTION_SCALE_UNIT=${PERCEPTION_SCALE_UNIT:-m}
       - ZMQ_TARGET_URL=tcp://logic-cpp:5558
     depends_on:
       - postgres_db
