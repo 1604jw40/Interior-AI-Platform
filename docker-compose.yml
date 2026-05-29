@@ -116,7 +116,7 @@ services:
       - interior_net
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY} # 호스트의 환경변수 읽어오기
-      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4.1-mini}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-5-mini}
       - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       - OPENAI_VECTOR_STORE_ID=${OPENAI_VECTOR_STORE_ID:-}
       - FIREBASE_STORAGE_BASE_URI=${FIREBASE_STORAGE_BASE_URI:-gs://interiorplatform-d58e0.firebasestorage.app}

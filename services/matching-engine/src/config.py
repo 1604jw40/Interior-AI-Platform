@@ -6,7 +6,7 @@ _PARENTS = Path(__file__).resolve().parents
 REPO_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else Path.cwd()
 
 
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 DEFAULT_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 OPENAI_VECTOR_STORE_ID = os.getenv("OPENAI_VECTOR_STORE_ID", "").strip()
 PERCEPTION_SCALE_UNIT = os.getenv("PERCEPTION_SCALE_UNIT", "m").strip().lower()

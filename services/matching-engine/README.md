@@ -27,7 +27,7 @@ gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/{raw_category}/
 ## Environment
 
 - `OPENAI_API_KEY`: 필수. OpenAI API 호출에 사용합니다.
-- `OPENAI_MODEL`: 선택. 기본값은 `gpt-4.1-mini`입니다.
+- `OPENAI_MODEL`: 선택. 기본값은 `gpt-5-mini`입니다.
 - `OPENAI_EMBEDDING_MODEL`: 선택. 기본값은 `text-embedding-3-small`입니다.
 - `OPENAI_VECTOR_STORE_ID`: 선택. 설정하면 OpenAI file search를 함께 사용할 수 있습니다.
 - `FIREBASE_STORAGE_BASE_URI`: 선택. 기본값은 `gs://interiorplatform-d58e0.firebasestorage.app`입니다.

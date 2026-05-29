@@ -98,7 +98,7 @@ Response:
   "vector_store_configured": false,
   "firebase_storage_base_uri": "gs://interiorplatform-d58e0.firebasestorage.app",
   "firebase_storage_prefix": "furniture_images",
-  "model": "gpt-4.1-mini",
+  "model": "gpt-5-mini",
   "embedding_model": "text-embedding-3-small",
   "perception_scale_unit": "m",
   "product_source": "raw_json",
@@ -178,7 +178,7 @@ Response 주요 구조:
 {
   "status": "success",
   "answer": "가장 적합한 상품은 ... 입니다.",
-  "model": "gpt-4.1-mini",
+  "model": "gpt-5-mini",
   "retrieval": {
     "mode": "perception_dimension_embedding_rag",
     "embedding_model": "text-embedding-3-small",

@@ -14,7 +14,7 @@
 3. infrastructure/product_db/data/raw/*.json에서 IKEA 상품 후보 로드
 4. x/y/z 치수 검사
 5. text-embedding-3-small로 후보 정렬
-6. gpt-4.1-mini로 한국어 추천 답변 생성
+6. gpt-5-mini로 한국어 추천 답변 생성
 7. 추천 상품, Firebase Storage 경로, trace 정보를 JSON으로 반환
 ```
 
@@ -121,7 +121,7 @@ fit.products[].metadata.image_filename
 {
   "status": "success",
   "answer": "가장 적합한 상품은 ... 입니다.",
-  "model": "gpt-4.1-mini",
+  "model": "gpt-5-mini",
   "retrieval": {
     "mode": "perception_dimension_embedding_rag",
     "embedding_model": "text-embedding-3-small",
