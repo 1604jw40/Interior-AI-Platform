@@ -1,25 +1,22 @@
+import hashlib
 import json
 import math
 import os
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
 from openai import OpenAI, OpenAIError
-from psycopg import connect
-from psycopg.rows import dict_row
 
 from .config import (
-    DB_HOST,
-    DB_NAME,
-    DB_PASS,
-    DB_PORT,
-    DB_USER,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MODEL,
     FIREBASE_STORAGE_BASE_URI,
+    FIREBASE_STORAGE_PREFIX,
     MAX_RAG_CANDIDATES,
     OPENAI_VECTOR_STORE_ID,
     PERCEPTION_SCALE_UNIT,
+    PRODUCT_RAW_DATA_DIR,
 )
 from .schemas import (
     Dimensions,
@@ -48,9 +45,12 @@ def health_payload() -> dict[str, Any]:
         "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
         "vector_store_configured": bool(OPENAI_VECTOR_STORE_ID),
         "firebase_storage_base_uri": FIREBASE_STORAGE_BASE_URI,
+        "firebase_storage_prefix": FIREBASE_STORAGE_PREFIX,
         "model": DEFAULT_MODEL,
         "embedding_model": DEFAULT_EMBEDDING_MODEL,
         "perception_scale_unit": PERCEPTION_SCALE_UNIT,
+        "product_source": "raw_json",
+        "product_raw_data_dir": str(PRODUCT_RAW_DATA_DIR),
     }
 
 
@@ -100,6 +100,15 @@ def storage_uri(storage_path: str | None) -> str | None:
     if storage_path.startswith("gs://"):
         return storage_path
     return f"{FIREBASE_STORAGE_BASE_URI}/{storage_path.lstrip('/')}"
+
+
+def firebase_storage_path(category_label: str | None, image_filename: str | None) -> str | None:
+    if not image_filename:
+        return None
+    if image_filename.startswith("gs://") or image_filename.startswith("http://") or image_filename.startswith("https://"):
+        return image_filename
+    category = (category_label or "uncategorized").strip().strip("/")
+    return f"{FIREBASE_STORAGE_PREFIX}/{category}/{image_filename}"
 
 
 def safe_float(value: str | None) -> float | None:
@@ -174,85 +183,83 @@ def category_matches(perception_category: str, product: ProductCandidate) -> boo
     return perception_category.lower() in product_category.lower() or product_category.lower() in perception_category.lower()
 
 
-def load_products_from_db(category: str | None, limit: int) -> list[ProductCandidate]:
-    if not all([DB_HOST, DB_USER, DB_PASS, DB_NAME]):
-        raise HTTPException(
-            status_code=500,
-            detail="Product candidates were not provided and DB_HOST/DB_USER/DB_PASS/DB_NAME are not configured.",
+def raw_data_dir() -> Path:
+    path = PRODUCT_RAW_DATA_DIR
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def product_id(item: dict[str, Any], category_label: str, index: int) -> str:
+    source = item.get("product_url") or item.get("image_filename") or item.get("product_name") or f"{category_label}-{index}"
+    return hashlib.sha1(str(source).encode("utf-8")).hexdigest()[:12]
+
+
+def load_raw_product_items() -> list[tuple[str, int, dict[str, Any]]]:
+    data_dir = raw_data_dir()
+    if not data_dir.exists():
+        raise HTTPException(status_code=500, detail=f"Product raw data directory was not found: {data_dir}")
+
+    items: list[tuple[str, int, dict[str, Any]]] = []
+    for json_path in sorted(data_dir.glob("ikea_*.json")):
+        category_label = json_path.stem.removeprefix("ikea_")
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=500, detail=f"Invalid product raw JSON: {json_path}: {exc}") from exc
+        if not isinstance(data, list):
+            raise HTTPException(status_code=500, detail=f"Product raw JSON root must be an array: {json_path}")
+        items.extend((category_label, index, item) for index, item in enumerate(data, start=1) if isinstance(item, dict))
+    return items
+
+
+def load_products_from_raw(category: str | None, limit: int) -> list[ProductCandidate]:
+    candidates: list[ProductCandidate] = []
+    for category_label, index, item in load_raw_product_items():
+        category_code = item.get("top_category_code") or category_label
+        category_name = item.get("top_category_name") or category_label
+        image_filename = item.get("image_filename")
+        storage_path = (
+            item.get("firebase_storage_path")
+            or item.get("firebase_gs_url")
+            or firebase_storage_path(category_label, image_filename)
         )
 
-    query = """
-        SELECT
-            p.id,
-            p.product_name,
-            p.price,
-            p.width_x,
-            p.depth_y,
-            p.height_z,
-            p.product_url,
-            c.category_code,
-            c.category_name,
-            img.image_filename AS storage_path,
-            img.image_description
-        FROM products p
-        LEFT JOIN categories c ON c.id = p.category_id
-        LEFT JOIN LATERAL (
-            SELECT image_filename, image_description
-            FROM product_images
-            WHERE product_id = p.id
-            ORDER BY is_main DESC, id ASC
-            LIMIT 1
-        ) img ON true
-        WHERE (
-            %(category_is_null)s
-            OR LOWER(c.category_code) LIKE LOWER(%(category_like)s)
-            OR LOWER(c.category_name) LIKE LOWER(%(category_like)s)
-        )
-        ORDER BY p.id ASC
-        LIMIT %(limit)s
-    """
+        try:
+            candidate = ProductCandidate(
+                id=product_id(item, category_label, index),
+                product_name=item.get("product_name"),
+                price=item.get("price"),
+                width_x=item.get("width_x"),
+                depth_y=item.get("depth_y"),
+                height_z=item.get("height_z"),
+                product_url=item.get("product_url"),
+                category=category_name,
+                category_code=category_code,
+                storage_path=storage_path,
+                metadata={
+                    "source": "raw_json",
+                    "raw_category_label": category_label,
+                    "image_filename": image_filename,
+                    "image_path": item.get("image_path"),
+                    "firebase_image_url": item.get("firebase_image_url"),
+                    "color": item.get("color"),
+                    "materials": item.get("materials"),
+                    "texture_keywords": item.get("texture_keywords"),
+                    "category_path": item.get("category_path"),
+                },
+            )
+        except ValueError:
+            continue
 
-    params = {
-        "category_is_null": category is None,
-        "category_like": f"%{category}%" if category else None,
-        "limit": limit,
-    }
+        if category is None or category_matches(category, candidate):
+            candidates.append(candidate)
+            if len(candidates) >= limit:
+                return candidates
 
-    try:
-        with connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            row_factory=dict_row,
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(query, params)
-                rows = cur.fetchall()
-
-                if not rows and category:
-                    cur.execute(query, {"category_is_null": True, "category_like": None, "limit": limit})
-                    rows = cur.fetchall()
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Product DB query failed: {exc}") from exc
-
-    return [
-        ProductCandidate(
-            id=row["id"],
-            product_name=row["product_name"],
-            price=row["price"],
-            width_x=row["width_x"],
-            depth_y=row["depth_y"],
-            height_z=row["height_z"],
-            product_url=row["product_url"],
-            category=row["category_code"] or row["category_name"],
-            category_code=row["category_code"],
-            storage_path=row["storage_path"],
-            metadata={"image_description": row["image_description"]},
-        )
-        for row in rows
-    ]
+    if category and not candidates:
+        return load_products_from_raw(None, limit)
+    return candidates[:limit]
 
 
 def remaining_space(space: Dimensions, product: Dimensions) -> Dimensions:
@@ -481,8 +488,8 @@ def rag_perception_query(request: PerceptionRagQueryRequest) -> FitRagQueryRespo
     client = openai_client()
     perception = select_perception_object(request.perception_objects, request.target_object_id)
     available_space = request.space or space_from_perception(perception)
-    product_source_kind = "request" if request.products else "db"
-    product_source = request.products or load_products_from_db(perception.category, request.limit)
+    product_source_kind = "request" if request.products else "raw_json"
+    product_source = request.products or load_products_from_raw(perception.category, request.limit)
     if not product_source:
         raise HTTPException(status_code=404, detail="No product candidates were found for RAG.")
 

@@ -1,4 +1,9 @@
 import os
+from pathlib import Path
+
+
+_PARENTS = Path(__file__).resolve().parents
+REPO_ROOT = _PARENTS[3] if len(_PARENTS) > 3 else Path.cwd()
 
 
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -9,10 +14,11 @@ FIREBASE_STORAGE_BASE_URI = os.getenv(
     "FIREBASE_STORAGE_BASE_URI",
     "gs://interiorplatform-d58e0.firebasestorage.app",
 ).rstrip("/")
+FIREBASE_STORAGE_PREFIX = os.getenv("FIREBASE_STORAGE_PREFIX", "furniture_images").strip().strip("/")
 MAX_RAG_CANDIDATES = int(os.getenv("MAX_RAG_CANDIDATES", "5"))
-
-DB_HOST = os.getenv("DB_HOST")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASS")
-DB_NAME = os.getenv("DB_NAME")
-DB_PORT = int(os.getenv("DB_PORT", "5432"))
+PRODUCT_RAW_DATA_DIR = Path(
+    os.getenv(
+        "PRODUCT_RAW_DATA_DIR",
+        str(REPO_ROOT / "infrastructure" / "product_db" / "data" / "raw"),
+    )
+)

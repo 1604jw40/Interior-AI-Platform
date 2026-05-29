@@ -158,7 +158,7 @@ class PerceptionRagQueryRequest(BaseModel):
     perception_objects: list[PerceptionObject] = Field(..., min_length=1)
     products: list[ProductCandidate] | None = Field(
         default=None,
-        description="Optional product rows. If omitted, matching-engine loads products from DB.",
+        description="Optional product rows. If omitted, matching-engine loads products from product_db/data/raw JSON files.",
     )
     target_object_id: int | None = None
     space: Dimensions | None = Field(
