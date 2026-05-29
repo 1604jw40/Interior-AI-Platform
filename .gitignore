@@ -77,7 +77,7 @@ infrastructure/postgres_db/*.pid
 infrastructure/product_db/.env
 infrastructure/product_db/output/
 infrastructure/product_db/outputs/
-infrastructure/product_db/data/
+infrastructure/product_db/data/images/
 infrastructure/product_db/*.json
 infrastructure/product_db/*.csv
 
