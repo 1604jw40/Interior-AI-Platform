@@ -16,6 +16,7 @@ FIREBASE_STORAGE_BASE_URI = os.getenv(
 ).rstrip("/")
 FIREBASE_STORAGE_PREFIX = os.getenv("FIREBASE_STORAGE_PREFIX", "furniture_images").strip().strip("/")
 MAX_RAG_CANDIDATES = int(os.getenv("MAX_RAG_CANDIDATES", "5"))
+EMBEDDING_CACHE_PATH = Path(os.getenv("EMBEDDING_CACHE_PATH", "/tmp/matching_engine_embeddings.json"))
 PRODUCT_RAW_DATA_DIR = Path(
     os.getenv(
         "PRODUCT_RAW_DATA_DIR",

@@ -11,6 +11,7 @@ from openai import OpenAI, OpenAIError
 from .config import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_MODEL,
+    EMBEDDING_CACHE_PATH,
     FIREBASE_STORAGE_BASE_URI,
     FIREBASE_STORAGE_PREFIX,
     MAX_RAG_CANDIDATES,
@@ -36,6 +37,23 @@ from .schemas import (
 
 NO_FIT_ANSWER = "No product candidates fit the requested space."
 NO_PERCEPTION_FIT_ANSWER = "No product candidates fit the detected object's available space."
+NO_FIT_ANSWER_KO = "요청한 공간에 들어가는 상품 후보가 없습니다."
+NO_PERCEPTION_FIT_ANSWER_KO = "감지된 객체의 사용 가능 공간에 들어가는 상품 후보가 없습니다."
+
+CATEGORY_ALIASES = {
+    "bed": {"bed", "beds", "mattress", "mattresses", "침대", "매트리스", "beds_mattresses"},
+    "beds_mattresses": {"bed", "beds", "mattress", "mattresses", "침대", "매트리스", "beds_mattresses"},
+    "desk": {"desk", "desks", "office", "office chair", "office_chair", "책상", "사무용", "desks_office_chairs"},
+    "desks_office_chairs": {"desk", "desks", "office", "chair", "office chair", "책상", "의자", "desks_office_chairs"},
+    "sofa": {"sofa", "sofas", "armchair", "armchairs", "소파", "암체어", "sofas_armchairs"},
+    "sofas_armchairs": {"sofa", "sofas", "armchair", "armchairs", "소파", "암체어", "sofas_armchairs"},
+    "storage": {"storage", "cabinet", "shelf", "shelves", "수납", "수납장", "선반", "storage_accessories"},
+    "storage_accessories": {"storage", "cabinet", "shelf", "shelves", "수납", "수납장", "선반", "storage_accessories"},
+    "table": {"table", "tables", "chair", "chairs", "테이블", "식탁", "의자", "tables_chairs"},
+    "tables_chairs": {"table", "tables", "chair", "chairs", "테이블", "식탁", "의자", "tables_chairs"},
+}
+
+_EMBEDDING_CACHE: dict[str, list[float]] | None = None
 
 
 def health_payload() -> dict[str, Any]:
@@ -51,6 +69,7 @@ def health_payload() -> dict[str, Any]:
         "perception_scale_unit": PERCEPTION_SCALE_UNIT,
         "product_source": "raw_json",
         "product_raw_data_dir": str(PRODUCT_RAW_DATA_DIR),
+        "embedding_cache_path": str(EMBEDDING_CACHE_PATH),
     }
 
 
@@ -72,7 +91,9 @@ def build_input(request: RagQueryRequest) -> str:
         "Never invent dimensions, prices, URLs, images, model paths, or product names.",
         "Prioritize in this order: physical fit, category match, useful remaining space, relevance_score, price.",
         "If every candidate is too tight or unsafe, say that no safe recommendation is available.",
-        "Keep the answer concise and include the chosen product id, name, dimensions, remaining space, category, storage_uri, and product_url when available.",
+        "Return only one valid JSON object. Do not wrap it in markdown.",
+        "The JSON schema must be: {\"summary\": string, \"recommendations\": [{\"product_id\": string, \"product_name\": string, \"rank\": number, \"reason\": string, \"fit_reason\": string, \"category\": string, \"dimensions_cm\": {\"x\": number, \"y\": number, \"z\": number}, \"remaining_cm\": {\"x\": number, \"y\": number, \"z\": number}, \"scores\": {\"fit_score\": number, \"semantic_score\": number, \"clearance_score\": number, \"final_score\": number}, \"storage_uri\": string, \"product_url\": string}], \"warnings\": [string], \"trace\": object}.",
+        "Keep Korean text in summary, reason, fit_reason, and warnings.",
         "Mention trace identifiers only when they help backend debugging; do not expose internal implementation details beyond provided trace fields.",
         "",
         f"Query: {request.query}",
@@ -176,11 +197,33 @@ def space_from_perception(obj: ParsedPerceptionObject) -> Dimensions:
     )
 
 
+def category_terms(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    normalized = value.lower().replace("&", " ").replace("-", "_").replace(" ", "_")
+    raw_terms = {normalized}
+    raw_terms.update(part for part in normalized.split("_") if part)
+
+    expanded = set(raw_terms)
+    for key, aliases in CATEGORY_ALIASES.items():
+        if key in raw_terms or raw_terms.intersection(aliases):
+            expanded.update(aliases)
+            expanded.add(key)
+    return expanded
+
+
 def category_matches(perception_category: str, product: ProductCandidate) -> bool:
     product_category = product.category or product.category_code
     if not product_category:
         return True
-    return perception_category.lower() in product_category.lower() or product_category.lower() in perception_category.lower()
+    perception_terms = category_terms(perception_category)
+    product_terms = category_terms(product_category)
+    product_terms.update(category_terms(product.category_code))
+    if perception_terms.intersection(product_terms):
+        return True
+    perception_text = perception_category.lower()
+    product_text = product_category.lower()
+    return perception_text in product_text or product_text in perception_text
 
 
 def raw_data_dir() -> Path:
@@ -270,15 +313,78 @@ def remaining_space(space: Dimensions, product: Dimensions) -> Dimensions:
     )
 
 
-def fits(space: Dimensions, product: Dimensions, allow_xy_rotation: bool) -> tuple[bool, str | None, Dimensions | None]:
+def deficit(space: Dimensions, product: Dimensions) -> Dimensions:
+    return Dimensions(
+        x=round(max(product.x - space.x, 0), 3),
+        y=round(max(product.y - space.y, 0), 3),
+        z=round(max(product.z - space.z, 0), 3),
+    )
+
+
+def fit_reason(product: Dimensions, remaining: Dimensions, orientation: str) -> str:
+    return (
+        f"x/y/z 기준 통과: orientation={orientation}, "
+        f"상품 크기 {product.x}x{product.y}x{product.z}cm, "
+        f"남은 공간 {remaining.x}x{remaining.y}x{remaining.z}cm"
+    )
+
+
+def reject_reason(space: Dimensions, product: Dimensions, allow_xy_rotation: bool) -> str:
+    options = [("xyz", product)]
+    if allow_xy_rotation:
+        options.append(("yxz", Dimensions(x=product.y, y=product.x, z=product.z)))
+
+    orientation, rejected_product = min(
+        options,
+        key=lambda option: deficit(space, option[1]).x + deficit(space, option[1]).y + deficit(space, option[1]).z,
+    )
+    shortage = deficit(space, rejected_product)
+    shortage_parts = [
+        f"{axis}축 {amount}cm 초과"
+        for axis, amount in (("x", shortage.x), ("y", shortage.y), ("z", shortage.z))
+        if amount > 0
+    ]
+    return f"공간 부족: orientation={orientation}, " + ", ".join(shortage_parts)
+
+
+def score_fit(space: Dimensions, product: Dimensions, remaining: Dimensions | None) -> tuple[float, float]:
+    if remaining is None:
+        return 0.0, 0.0
+    total_space = max(space.x + space.y + space.z, 0.001)
+    total_used = min(product.x, space.x) + min(product.y, space.y) + min(product.z, space.z)
+    fit_score = round(total_used / total_space, 6)
+    clearance_score = round(
+        (
+            remaining.x / max(space.x, 0.001)
+            + remaining.y / max(space.y, 0.001)
+            + remaining.z / max(space.z, 0.001)
+        )
+        / 3,
+        6,
+    )
+    return fit_score, clearance_score
+
+
+def update_final_score(product: FitProduct) -> None:
+    if not product.fits:
+        product.final_score = 0.0
+        return
+    semantic = product.semantic_score if product.semantic_score is not None else product.relevance_score
+    semantic = semantic if semantic is not None else 0.5
+    fit_score = product.fit_score if product.fit_score is not None else 0.0
+    clearance_score = product.clearance_score if product.clearance_score is not None else 0.0
+    product.final_score = round((semantic * 0.55) + (fit_score * 0.25) + (clearance_score * 0.20), 6)
+
+
+def fits(space: Dimensions, product: Dimensions, allow_xy_rotation: bool) -> tuple[bool, str | None, Dimensions | None, Dimensions | None]:
     if product.x <= space.x and product.y <= space.y and product.z <= space.z:
-        return True, "xyz", remaining_space(space, product)
+        return True, "xyz", remaining_space(space, product), product
 
     rotated = Dimensions(x=product.y, y=product.x, z=product.z)
     if allow_xy_rotation and rotated.x <= space.x and rotated.y <= space.y and rotated.z <= space.z:
-        return True, "yxz", remaining_space(space, rotated)
+        return True, "yxz", remaining_space(space, rotated), rotated
 
-    return False, None, None
+    return False, None, None, None
 
 
 def fit_products(request: FitQueryRequest) -> FitQueryResponse:
@@ -289,53 +395,64 @@ def fit_products(request: FitQueryRequest) -> FitQueryResponse:
     )
 
     products: list[FitProduct] = []
+    rejected_products: list[FitProduct] = []
     for product in request.products:
         if product.dimensions is None or product.name is None:
             continue
 
-        does_fit, orientation, remaining = fits(
+        does_fit, orientation, remaining, oriented_dimensions = fits(
             effective_space,
             product.dimensions,
             request.allow_xy_rotation,
         )
-        products.append(
-            FitProduct(
-                id=product.id,
-                name=product.name,
-                dimensions=product.dimensions,
-                fits=does_fit,
-                orientation=orientation,
-                remaining_cm=remaining,
-                storage_uri=storage_uri(product.storage_path),
-                price=product.price,
-                category=product.category,
-                product_url=product.product_url,
-                trace={
-                    "source": "request_or_db",
-                    "product_id": product.id,
-                    "product_name": product.name,
-                    "category": product.category,
-                    "category_code": product.category_code,
-                    "storage_path": product.storage_path,
-                    "storage_uri": storage_uri(product.storage_path),
-                    "product_url": product.product_url,
-                    "dimensions_source": {
-                        "width_x": product.width_x,
-                        "depth_y": product.depth_y,
-                        "height_z": product.height_z,
-                    },
+        scored_dimensions = oriented_dimensions or product.dimensions
+        fit_score, clearance_score = score_fit(effective_space, scored_dimensions, remaining)
+        fit_product = FitProduct(
+            id=product.id,
+            name=product.name,
+            dimensions=product.dimensions,
+            fits=does_fit,
+            orientation=orientation,
+            remaining_cm=remaining,
+            storage_uri=storage_uri(product.storage_path),
+            price=product.price,
+            category=product.category,
+            product_url=product.product_url,
+            fit_reason=fit_reason(scored_dimensions, remaining, orientation) if does_fit and remaining and orientation else None,
+            reject_reason=None if does_fit else reject_reason(effective_space, product.dimensions, request.allow_xy_rotation),
+            fit_score=fit_score,
+            clearance_score=clearance_score,
+            trace={
+                "source": product.metadata.get("source") if product.metadata else "request",
+                "product_id": product.id,
+                "product_name": product.name,
+                "category": product.category,
+                "category_code": product.category_code,
+                "storage_path": product.storage_path,
+                "storage_uri": storage_uri(product.storage_path),
+                "product_url": product.product_url,
+                "orientation": orientation,
+                "allow_xy_rotation": request.allow_xy_rotation,
+                "dimensions_source": {
+                    "width_x": product.width_x,
+                    "depth_y": product.depth_y,
+                    "height_z": product.height_z,
                 },
-                metadata=product.metadata,
-            )
+            },
+            metadata=product.metadata,
         )
+        update_final_score(fit_product)
+        if does_fit:
+            products.append(fit_product)
+        else:
+            rejected_products.append(fit_product)
 
-    fitting_products = [product for product in products if product.fits]
-    fitting_products.sort(
+    products.sort(
         key=lambda product: (
-            product.remaining_cm.x + product.remaining_cm.y + product.remaining_cm.z
-            if product.remaining_cm
-            else float("inf")
-        )
+            product.final_score if product.final_score is not None else 0,
+            product.fit_score if product.fit_score is not None else 0,
+        ),
+        reverse=True,
     )
 
     return FitQueryResponse(
@@ -343,8 +460,10 @@ def fit_products(request: FitQueryRequest) -> FitQueryResponse:
         space=effective_space,
         clearance_cm=request.clearance_cm,
         firebase_storage_base_uri=FIREBASE_STORAGE_BASE_URI,
-        fit_count=len(fitting_products),
-        products=fitting_products,
+        fit_count=len(products),
+        rejected_count=len(rejected_products),
+        products=products,
+        rejected_products=rejected_products[:10],
     )
 
 
@@ -360,6 +479,16 @@ def candidate_text(product: FitProduct) -> str:
         parts.append(f"price: {product.price}")
     if product.relevance_score is not None:
         parts.append(f"relevance_score: {product.relevance_score}")
+    if product.fit_score is not None:
+        parts.append(f"fit_score: {product.fit_score}")
+    if product.semantic_score is not None:
+        parts.append(f"semantic_score: {product.semantic_score}")
+    if product.clearance_score is not None:
+        parts.append(f"clearance_score: {product.clearance_score}")
+    if product.final_score is not None:
+        parts.append(f"final_score: {product.final_score}")
+    if product.fit_reason:
+        parts.append(f"fit_reason: {product.fit_reason}")
     if product.remaining_cm:
         parts.append(
             "remaining_cm: "
@@ -379,37 +508,187 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
+def embedding_cache_key(text: str) -> str:
+    source = f"{DEFAULT_EMBEDDING_MODEL}:{text}"
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def load_embedding_cache() -> dict[str, list[float]]:
+    global _EMBEDDING_CACHE
+    if _EMBEDDING_CACHE is not None:
+        return _EMBEDDING_CACHE
+    try:
+        if EMBEDDING_CACHE_PATH.exists():
+            data = json.loads(EMBEDDING_CACHE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _EMBEDDING_CACHE = {
+                    key: value
+                    for key, value in data.items()
+                    if isinstance(value, list)
+                }
+                return _EMBEDDING_CACHE
+    except OSError:
+        pass
+    except json.JSONDecodeError:
+        pass
+    _EMBEDDING_CACHE = {}
+    return _EMBEDDING_CACHE
+
+
+def save_embedding_cache(cache: dict[str, list[float]]) -> None:
+    try:
+        EMBEDDING_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EMBEDDING_CACHE_PATH.write_text(json.dumps(cache), encoding="utf-8")
+    except OSError:
+        return
+
+
+def cached_embeddings(client: OpenAI, inputs: list[str]) -> list[list[float]]:
+    cache = load_embedding_cache()
+    result: list[list[float] | None] = []
+    missing_inputs: list[str] = []
+    missing_indexes: list[int] = []
+
+    for index, text in enumerate(inputs):
+        key = embedding_cache_key(text)
+        cached = cache.get(key)
+        if cached:
+            result.append(cached)
+        else:
+            result.append(None)
+            missing_inputs.append(text)
+            missing_indexes.append(index)
+
+    if missing_inputs:
+        embedding_response = client.embeddings.create(
+            model=DEFAULT_EMBEDDING_MODEL,
+            input=missing_inputs,
+        )
+        for index, item in zip(missing_indexes, embedding_response.data):
+            vector = item.embedding
+            result[index] = vector
+            cache[embedding_cache_key(inputs[index])] = vector
+        save_embedding_cache(cache)
+
+    return [vector for vector in result if vector is not None]
+
+
 def rank_products_by_embedding(client: OpenAI, query: str, products: list[FitProduct]) -> list[FitProduct]:
     if not products:
         return products
 
     inputs = [query] + [candidate_text(product) for product in products]
-    embedding_response = client.embeddings.create(
-        model=DEFAULT_EMBEDDING_MODEL,
-        input=inputs,
-    )
-    vectors = [item.embedding for item in embedding_response.data]
+    vectors = cached_embeddings(client, inputs)
     query_vector = vectors[0]
 
     for product, vector in zip(products, vectors[1:]):
-        product.relevance_score = round(cosine_similarity(query_vector, vector), 6)
+        product.semantic_score = round(cosine_similarity(query_vector, vector), 6)
+        product.relevance_score = product.semantic_score
+        update_final_score(product)
 
     return sorted(
         products,
         key=lambda product: (
-            product.relevance_score if product.relevance_score is not None else -1,
-            -(
-                product.remaining_cm.x + product.remaining_cm.y + product.remaining_cm.z
-                if product.remaining_cm
-                else float("inf")
-            ),
+            product.final_score if product.final_score is not None else -1,
+            product.semantic_score if product.semantic_score is not None else -1,
         ),
         reverse=True,
     )
 
 
+def parse_json_object(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.strip("`")
+        if stripped.startswith("json"):
+            stripped = stripped[4:].strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def product_recommendation(product: dict[str, Any], rank: int, reason: str | None = None) -> dict[str, Any]:
+    dimensions = product.get("dimensions") or {}
+    remaining = product.get("remaining_cm") or {}
+    return {
+        "product_id": str(product.get("id")),
+        "product_name": product.get("name"),
+        "rank": rank,
+        "reason": reason or "공간 조건과 상품 관련도 기준으로 선별된 후보입니다.",
+        "fit_reason": product.get("fit_reason") or "x/y/z 치수 검사를 통과했습니다.",
+        "category": product.get("category"),
+        "dimensions_cm": {
+            "x": dimensions.get("x"),
+            "y": dimensions.get("y"),
+            "z": dimensions.get("z"),
+        },
+        "remaining_cm": {
+            "x": remaining.get("x"),
+            "y": remaining.get("y"),
+            "z": remaining.get("z"),
+        },
+        "scores": {
+            "fit_score": product.get("fit_score"),
+            "semantic_score": product.get("semantic_score"),
+            "clearance_score": product.get("clearance_score"),
+            "final_score": product.get("final_score"),
+        },
+        "storage_uri": product.get("storage_uri"),
+        "product_url": product.get("product_url"),
+    }
+
+
+def structured_from_candidates(
+    fit_candidates: list[dict[str, Any]] | None,
+    summary: str,
+    warning: str | None = None,
+) -> dict[str, Any]:
+    candidates = fit_candidates or []
+    recommendations = [
+        product_recommendation(product, index)
+        for index, product in enumerate(candidates[:MAX_RAG_CANDIDATES], start=1)
+    ]
+    warnings = [warning] if warning else []
+    return {
+        "summary": summary,
+        "recommendations": recommendations,
+        "warnings": warnings,
+        "trace": {
+            "candidate_count": len(candidates),
+            "max_rag_candidates": MAX_RAG_CANDIDATES,
+            "generated_by": "matching_engine_fallback" if warning else "llm_or_matching_engine",
+        },
+    }
+
+
+def fallback_rag_response(
+    request: RagQueryRequest,
+    model: str,
+    retrieval: dict[str, Any],
+    reason: str,
+) -> RagQueryResponse:
+    summary = (
+        "LLM 응답 생성에 실패해 후보정 결과를 기준으로 추천 후보를 반환합니다."
+        if request.fit_candidates
+        else "LLM 응답 생성에 실패했고 제공된 후보가 없어 추천을 생성할 수 없습니다."
+    )
+    structured = structured_from_candidates(request.fit_candidates, summary, reason)
+    return RagQueryResponse(
+        status="degraded",
+        answer=structured["summary"],
+        structured_answer=structured,
+        model=model,
+        retrieval={
+            **retrieval,
+            "llm_fallback": True,
+            "fallback_reason": reason,
+        },
+    )
+
+
 def rag_query(request: RagQueryRequest) -> RagQueryResponse:
-    client = openai_client()
     model = request.model or DEFAULT_MODEL
     tools = []
     retrieval = {"mode": "provided_context"}
@@ -427,6 +706,7 @@ def rag_query(request: RagQueryRequest) -> RagQueryResponse:
         }
 
     try:
+        client = openai_client()
         create_kwargs: dict[str, Any] = {
             "model": model,
             "input": build_input(request),
@@ -436,32 +716,50 @@ def rag_query(request: RagQueryRequest) -> RagQueryResponse:
 
         response = client.responses.create(**create_kwargs)
     except OpenAIError as exc:
-        raise HTTPException(status_code=502, detail=f"OpenAI API error: {exc}") from exc
+        return fallback_rag_response(request, model, retrieval, f"OpenAI API error: {exc}")
+    except HTTPException as exc:
+        return fallback_rag_response(request, model, retrieval, str(exc.detail))
+
+    structured_answer = parse_json_object(response.output_text)
+    answer = (
+        structured_answer.get("summary")
+        if structured_answer and isinstance(structured_answer.get("summary"), str)
+        else response.output_text
+    )
 
     return RagQueryResponse(
         status="success",
-        answer=response.output_text,
+        answer=answer,
+        structured_answer=structured_answer,
         model=model,
-        retrieval=retrieval,
+        retrieval={
+            **retrieval,
+            "structured_response": structured_answer is not None,
+        },
     )
 
 
 def rag_fit_query(request: FitRagQueryRequest) -> FitRagQueryResponse:
-    client = openai_client()
     fit = fit_products(request)
     if not fit.products:
+        structured = structured_from_candidates([], NO_FIT_ANSWER_KO)
         return FitRagQueryResponse(
             status="success",
-            answer=NO_FIT_ANSWER,
+            answer=NO_FIT_ANSWER_KO,
+            structured_answer=structured,
             model=request.model or DEFAULT_MODEL,
             retrieval={"mode": "no_fit_candidates"},
             fit=fit,
         )
 
+    embedding_fallback_reason = None
     try:
+        client = openai_client()
         fit.products = rank_products_by_embedding(client, request.query, fit.products)
     except OpenAIError as exc:
-        raise HTTPException(status_code=502, detail=f"OpenAI embeddings error: {exc}") from exc
+        embedding_fallback_reason = f"OpenAI embeddings error: {exc}"
+    except HTTPException as exc:
+        embedding_fallback_reason = str(exc.detail)
     fit.products = fit.products[:MAX_RAG_CANDIDATES]
 
     rag_response = rag_query(
@@ -476,16 +774,21 @@ def rag_fit_query(request: FitRagQueryRequest) -> FitRagQueryResponse:
     )
 
     return FitRagQueryResponse(
-        status="success",
+        status=rag_response.status,
         answer=rag_response.answer,
+        structured_answer=rag_response.structured_answer,
         model=rag_response.model,
-        retrieval=rag_response.retrieval,
+        retrieval={
+            **rag_response.retrieval,
+            "embedding_cache_path": str(EMBEDDING_CACHE_PATH),
+            "embedding_fallback": embedding_fallback_reason is not None,
+            "embedding_fallback_reason": embedding_fallback_reason,
+        },
         fit=fit,
     )
 
 
 def rag_perception_query(request: PerceptionRagQueryRequest) -> FitRagQueryResponse:
-    client = openai_client()
     perception = select_perception_object(request.perception_objects, request.target_object_id)
     available_space = request.space or space_from_perception(perception)
     product_source_kind = "request" if request.products else "raw_json"
@@ -508,9 +811,11 @@ def rag_perception_query(request: PerceptionRagQueryRequest) -> FitRagQueryRespo
         )
     )
     if not fit.products:
+        structured = structured_from_candidates([], NO_PERCEPTION_FIT_ANSWER_KO)
         return FitRagQueryResponse(
             status="success",
-            answer=NO_PERCEPTION_FIT_ANSWER,
+            answer=NO_PERCEPTION_FIT_ANSWER_KO,
+            structured_answer=structured,
             model=request.model or DEFAULT_MODEL,
             retrieval={
                 "mode": "no_fit_candidates",
@@ -520,10 +825,14 @@ def rag_perception_query(request: PerceptionRagQueryRequest) -> FitRagQueryRespo
             perception=perception,
         )
 
+    embedding_fallback_reason = None
     try:
+        client = openai_client()
         fit.products = rank_products_by_embedding(client, request.query, fit.products)
     except OpenAIError as exc:
-        raise HTTPException(status_code=502, detail=f"OpenAI embeddings error: {exc}") from exc
+        embedding_fallback_reason = f"OpenAI embeddings error: {exc}"
+    except HTTPException as exc:
+        embedding_fallback_reason = str(exc.detail)
     fit.products = fit.products[:MAX_RAG_CANDIDATES]
 
     room_context = request.room_context or {}
@@ -549,13 +858,17 @@ def rag_perception_query(request: PerceptionRagQueryRequest) -> FitRagQueryRespo
     )
 
     return FitRagQueryResponse(
-        status="success",
+        status=rag_response.status,
         answer=rag_response.answer,
+        structured_answer=rag_response.structured_answer,
         model=rag_response.model,
         retrieval={
             **rag_response.retrieval,
             "mode": "perception_dimension_embedding_rag",
             "embedding_model": DEFAULT_EMBEDDING_MODEL,
+            "embedding_cache_path": str(EMBEDDING_CACHE_PATH),
+            "embedding_fallback": embedding_fallback_reason is not None,
+            "embedding_fallback_reason": embedding_fallback_reason,
             "product_source": product_source_kind,
             "perception_category": perception.category,
             "target_object_id": perception.id,

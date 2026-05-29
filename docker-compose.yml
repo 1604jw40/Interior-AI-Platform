@@ -122,5 +122,6 @@ services:
       - FIREBASE_STORAGE_BASE_URI=${FIREBASE_STORAGE_BASE_URI:-gs://interiorplatform-d58e0.firebasestorage.app}
       - FIREBASE_STORAGE_PREFIX=${FIREBASE_STORAGE_PREFIX:-furniture_images}
       - PRODUCT_RAW_DATA_DIR=/app/product_raw
+      - EMBEDDING_CACHE_PATH=/tmp/matching_engine_embeddings.json
       - PERCEPTION_SCALE_UNIT=${PERCEPTION_SCALE_UNIT:-m}
       - ZMQ_TARGET_URL=tcp://logic-cpp:5558

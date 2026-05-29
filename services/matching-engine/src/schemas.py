@@ -24,14 +24,15 @@ class RagQueryRequest(BaseModel):
 class RagQueryResponse(BaseModel):
     status: str
     answer: str
+    structured_answer: dict[str, Any] | None = None
     model: str
     retrieval: dict[str, Any]
 
 
 class Dimensions(BaseModel):
-    x: float = Field(..., gt=0, description="Width on the x axis, in cm.")
-    y: float = Field(..., gt=0, description="Depth on the y axis, in cm.")
-    z: float = Field(..., gt=0, description="Height on the z axis, in cm.")
+    x: float = Field(..., ge=0, description="Width on the x axis, in cm.")
+    y: float = Field(..., ge=0, description="Depth on the y axis, in cm.")
+    z: float = Field(..., ge=0, description="Height on the z axis, in cm.")
 
 
 class ProductCandidate(BaseModel):
@@ -131,6 +132,12 @@ class FitProduct(BaseModel):
     price: int | None = None
     category: str | None = None
     product_url: str | None = None
+    fit_reason: str | None = None
+    reject_reason: str | None = None
+    fit_score: float | None = None
+    semantic_score: float | None = None
+    clearance_score: float | None = None
+    final_score: float | None = None
     relevance_score: float | None = None
     trace: dict[str, Any] | None = None
     metadata: dict[str, Any] | None = None
@@ -142,7 +149,9 @@ class FitQueryResponse(BaseModel):
     clearance_cm: float
     firebase_storage_base_uri: str
     fit_count: int
+    rejected_count: int = 0
     products: list[FitProduct]
+    rejected_products: list[FitProduct] = Field(default_factory=list)
 
 
 class FitRagQueryRequest(FitQueryRequest):
@@ -175,6 +184,7 @@ class PerceptionRagQueryRequest(BaseModel):
 class FitRagQueryResponse(BaseModel):
     status: str
     answer: str
+    structured_answer: dict[str, Any] | None = None
     model: str
     retrieval: dict[str, Any]
     fit: FitQueryResponse
