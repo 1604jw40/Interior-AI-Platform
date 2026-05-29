@@ -2,6 +2,9 @@
 
 `matching-engine`는 상품 치수 필터링과 OpenAI RAG 응답을 담당하는 백엔드 HTTP API입니다.
 
+백엔드 연동 계약은 [API_CONTRACT.md](./API_CONTRACT.md)를 기준으로 보면 됩니다.
+팀 공유용 짧은 연동 가이드는 [BACKEND_INTEGRATION_GUIDE.md](./BACKEND_INTEGRATION_GUIDE.md)를 참고하세요.
+
 ## Environment
 
 - `OPENAI_API_KEY`: 필수. OpenAI API 호출에 사용합니다.
@@ -10,6 +13,7 @@
 - `OPENAI_VECTOR_STORE_ID`: 선택. 설정하면 `/rag/query`, `/rag/fit-query`에서 OpenAI file search RAG를 사용합니다.
 - `FIREBASE_STORAGE_BASE_URI`: 선택. 기본값은 `gs://interiorplatform-d58e0.firebasestorage.app`입니다.
 - `PERCEPTION_SCALE_UNIT`: 선택. `ai-perception`의 `scale_w`, `scale_h` 단위입니다. 기본값은 `m`이며 내부에서 cm로 변환합니다.
+- `MAX_RAG_CANDIDATES`: 선택. LLM에 전달할 상위 후보 개수입니다. 기본값은 `5`입니다.
 - `DB_HOST`, `DB_USER`, `DB_PASS`, `DB_NAME`, `DB_PORT`: `/rag/perception-query`에서 `products`를 생략하면 상품 스키마에서 후보를 읽어옵니다.
 
 ## Endpoints
