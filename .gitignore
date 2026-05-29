@@ -70,6 +70,16 @@ ENV/
 docker-compose.override.yml
 # DB 데이터가 로컬 폴더에 마운트된 경우 제외
 infrastructure/postgres_data/
+infrastructure/postgres_db/data/
+infrastructure/postgres_db/data_broken_backup_*/
+infrastructure/postgres_db/*.log
+infrastructure/postgres_db/*.pid
+infrastructure/product_db/.env
+infrastructure/product_db/output/
+infrastructure/product_db/outputs/
+infrastructure/product_db/data/
+infrastructure/product_db/*.json
+infrastructure/product_db/*.csv
 
 # ==========================================
 # 6. Shared Assets (중요: 대용량 파일 관리)
@@ -86,8 +96,6 @@ shared/models/test_room.jpg
 # FlatBuffers 생성 파일 (선택 사항: 자동 생성이므로 제외 가능)
 # shared/schema/vision_data_generated.h
 # shared/schema/InteriorPlatform/
-
-echo "infrastructure/postgres_db/data/"
 
 shared/models/*.safetensors
 shared/models/*.pth
