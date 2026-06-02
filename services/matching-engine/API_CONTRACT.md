@@ -133,6 +133,8 @@ Response 주요 필드:
       "fit_reason": "x/y/z 기준 통과: orientation=xyz, ...",
       "fit_score": 0.56,
       "clearance_score": 0.48,
+      "intent_score": 0.75,
+      "size_score": 0.82,
       "final_score": 0.51,
       "storage_uri": "gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/Storage_accessories/Storage accessories_00001.jpg",
       "trace": {
@@ -219,6 +221,8 @@ Response 주요 구조:
           "fit_score": 0.388535,
           "semantic_score": 0.8123,
           "clearance_score": 0.590178,
+          "intent_score": 0.85,
+          "size_score": 0.440741,
           "final_score": 0.662
         },
         "storage_uri": "gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/Desks_office_chairs/Desks office chairs_00002.jpg",

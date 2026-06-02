@@ -137,6 +137,8 @@ class FitProduct(BaseModel):
     fit_score: float | None = None
     semantic_score: float | None = None
     clearance_score: float | None = None
+    intent_score: float | None = None
+    size_score: float | None = None
     final_score: float | None = None
     relevance_score: float | None = None
     trace: dict[str, Any] | None = None

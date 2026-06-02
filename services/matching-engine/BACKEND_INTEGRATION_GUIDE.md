@@ -126,6 +126,8 @@ gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/{raw_category}/
           "fit_score": 0.388535,
           "semantic_score": 0.8123,
           "clearance_score": 0.590178,
+          "intent_score": 0.85,
+          "size_score": 0.440741,
           "final_score": 0.662
         },
         "storage_uri": "gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/Desks_office_chairs/Desks office chairs_00002.jpg",
@@ -168,6 +170,8 @@ gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/{raw_category}/
         "fit_score": 0.388535,
         "semantic_score": 0.8123,
         "clearance_score": 0.590178,
+        "intent_score": 0.85,
+        "size_score": 0.440741,
         "final_score": 0.662,
         "storage_uri": "gs://interiorplatform-d58e0.firebasestorage.app/furniture_images/Desks_office_chairs/Desks office chairs_00002.jpg",
         "trace": {

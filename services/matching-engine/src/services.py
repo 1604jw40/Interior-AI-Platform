@@ -55,6 +55,40 @@ CATEGORY_ALIASES = {
 
 _EMBEDDING_CACHE: dict[str, list[float]] | None = None
 
+INTENT_KEYWORDS = {
+    "bed": {"bed", "mattress", "day-bed", "daybed", "bedframe", "cot"},
+    "beds_mattresses": {"bed", "mattress", "day-bed", "daybed", "bedframe", "cot"},
+    "desk": {"desk", "table", "workstation", "laptop", "office chair", "swivel chair", "chair", "stool"},
+    "desks_office_chairs": {"desk", "table", "workstation", "laptop", "office chair", "swivel chair", "chair", "stool"},
+    "sofa": {"sofa", "couch", "armchair", "chaise", "seat", "seater"},
+    "sofas_armchairs": {"sofa", "couch", "armchair", "chaise", "seat", "seater"},
+    "storage": {"cabinet", "shelf", "shelving", "wardrobe", "drawer", "chest", "bookcase", "storage"},
+    "storage_accessories": {"cabinet", "shelf", "shelving", "wardrobe", "drawer", "chest", "bookcase", "storage"},
+    "table": {"table", "dining", "coffee table", "desk", "chair", "stool", "bench"},
+    "tables_chairs": {"table", "dining", "coffee table", "desk", "chair", "stool", "bench"},
+}
+
+ACCESSORY_KEYWORDS = {
+    "accessory",
+    "accessories",
+    "holder",
+    "organizer",
+    "organiser",
+    "insert",
+    "box",
+    "basket",
+    "cover",
+    "cushion",
+    "pad",
+    "roll",
+    "paper",
+    "lamp",
+    "stand",
+    "hook",
+    "rail",
+    "tray",
+}
+
 
 def health_payload() -> dict[str, Any]:
     return {
@@ -212,6 +246,70 @@ def category_terms(value: str | None) -> set[str]:
     return expanded
 
 
+def normalize_search_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return value.lower().replace("_", " ").replace("-", " ")
+
+
+def product_search_text(product: FitProduct) -> str:
+    metadata = product.metadata or {}
+    trace = product.trace or {}
+    parts = [
+        product.name,
+        product.category,
+        trace.get("category_code"),
+        metadata.get("raw_category_label"),
+        " ".join(metadata.get("category_path") or []),
+        " ".join(metadata.get("texture_keywords") or []),
+    ]
+    return normalize_search_text(" ".join(part for part in parts if part))
+
+
+def query_intent_keys(query: str) -> set[str]:
+    terms = category_terms(query)
+    normalized_query = normalize_search_text(query)
+    keys = {
+        key
+        for key, aliases in CATEGORY_ALIASES.items()
+        if key in terms or any(normalize_search_text(alias) in normalized_query for alias in aliases)
+    }
+    for key, keywords in INTENT_KEYWORDS.items():
+        if any(keyword in normalized_query for keyword in keywords):
+            keys.add(key)
+    return keys
+
+
+def score_product_intent(query: str, product: FitProduct) -> float:
+    intent_keys = query_intent_keys(query)
+    if not intent_keys:
+        product_terms = category_terms(product.category)
+        intent_keys = {
+            key
+            for key, aliases in CATEGORY_ALIASES.items()
+            if key in product_terms or product_terms.intersection(aliases)
+        }
+    text = product_search_text(product)
+    if not text:
+        return 0.5
+
+    positive_keywords = set()
+    for key in intent_keys:
+        positive_keywords.update(INTENT_KEYWORDS.get(key, set()))
+
+    positive_hits = sum(1 for keyword in positive_keywords if keyword in text)
+    accessory_hits = sum(1 for keyword in ACCESSORY_KEYWORDS if keyword in text)
+
+    score = 0.5
+    if positive_hits:
+        score += min(0.35, positive_hits * 0.12)
+    if accessory_hits:
+        score -= min(0.35, accessory_hits * 0.10)
+    if intent_keys and not positive_hits:
+        score -= 0.15
+    return round(max(0.0, min(score, 1.0)), 6)
+
+
 def category_matches(perception_category: str, product: ProductCandidate) -> bool:
     product_category = product.category or product.category_code
     if not product_category:
@@ -365,6 +463,33 @@ def score_fit(space: Dimensions, product: Dimensions, remaining: Dimensions | No
     return fit_score, clearance_score
 
 
+def score_size(space: Dimensions, product: Dimensions) -> float:
+    space_volume = max(space.x * space.y * space.z, 0.001)
+    product_volume = max(product.x * product.y * product.z, 0.001)
+    ratio = product_volume / space_volume
+    if ratio < 0.04:
+        return round(max(0.05, ratio / 0.04 * 0.35), 6)
+    if ratio < 0.12:
+        return round(0.35 + ((ratio - 0.04) / 0.08 * 0.35), 6)
+    if ratio <= 0.75:
+        return 1.0
+    return round(max(0.25, 1.0 - ((ratio - 0.75) / 0.25 * 0.45)), 6)
+
+
+def apply_product_quality_scores(query: str, product: FitProduct) -> None:
+    product.intent_score = score_product_intent(query, product)
+    if product.remaining_cm:
+        oriented_space = Dimensions(
+            x=product.dimensions.x + product.remaining_cm.x,
+            y=product.dimensions.y + product.remaining_cm.y,
+            z=product.dimensions.z + product.remaining_cm.z,
+        )
+        product.size_score = score_size(oriented_space, product.dimensions)
+    else:
+        product.size_score = 0.0
+    update_final_score(product)
+
+
 def update_final_score(product: FitProduct) -> None:
     if not product.fits:
         product.final_score = 0.0
@@ -373,7 +498,16 @@ def update_final_score(product: FitProduct) -> None:
     semantic = semantic if semantic is not None else 0.5
     fit_score = product.fit_score if product.fit_score is not None else 0.0
     clearance_score = product.clearance_score if product.clearance_score is not None else 0.0
-    product.final_score = round((semantic * 0.55) + (fit_score * 0.25) + (clearance_score * 0.20), 6)
+    intent_score = product.intent_score if product.intent_score is not None else 0.5
+    size_score = product.size_score if product.size_score is not None else 0.5
+    product.final_score = round(
+        (semantic * 0.40)
+        + (fit_score * 0.25)
+        + (intent_score * 0.18)
+        + (size_score * 0.12)
+        + (clearance_score * 0.05),
+        6,
+    )
 
 
 def fits(space: Dimensions, product: Dimensions, allow_xy_rotation: bool) -> tuple[bool, str | None, Dimensions | None, Dimensions | None]:
@@ -407,6 +541,7 @@ def fit_products(request: FitQueryRequest) -> FitQueryResponse:
         )
         scored_dimensions = oriented_dimensions or product.dimensions
         fit_score, clearance_score = score_fit(effective_space, scored_dimensions, remaining)
+        size_score = score_size(effective_space, scored_dimensions) if does_fit else 0.0
         fit_product = FitProduct(
             id=product.id,
             name=product.name,
@@ -422,6 +557,7 @@ def fit_products(request: FitQueryRequest) -> FitQueryResponse:
             reject_reason=None if does_fit else reject_reason(effective_space, product.dimensions, request.allow_xy_rotation),
             fit_score=fit_score,
             clearance_score=clearance_score,
+            size_score=size_score,
             trace={
                 "source": product.metadata.get("source") if product.metadata else "request",
                 "product_id": product.id,
@@ -433,6 +569,11 @@ def fit_products(request: FitQueryRequest) -> FitQueryResponse:
                 "product_url": product.product_url,
                 "orientation": orientation,
                 "allow_xy_rotation": request.allow_xy_rotation,
+                "scoring": {
+                    "fit_score": fit_score,
+                    "clearance_score": clearance_score,
+                    "size_score": size_score,
+                },
                 "dimensions_source": {
                     "width_x": product.width_x,
                     "depth_y": product.depth_y,
@@ -485,6 +626,10 @@ def candidate_text(product: FitProduct) -> str:
         parts.append(f"semantic_score: {product.semantic_score}")
     if product.clearance_score is not None:
         parts.append(f"clearance_score: {product.clearance_score}")
+    if product.intent_score is not None:
+        parts.append(f"intent_score: {product.intent_score}")
+    if product.size_score is not None:
+        parts.append(f"size_score: {product.size_score}")
     if product.final_score is not None:
         parts.append(f"final_score: {product.final_score}")
     if product.fit_reason:
@@ -584,7 +729,7 @@ def rank_products_by_embedding(client: OpenAI, query: str, products: list[FitPro
     for product, vector in zip(products, vectors[1:]):
         product.semantic_score = round(cosine_similarity(query_vector, vector), 6)
         product.relevance_score = product.semantic_score
-        update_final_score(product)
+        apply_product_quality_scores(query, product)
 
     return sorted(
         products,
@@ -633,6 +778,8 @@ def product_recommendation(product: dict[str, Any], rank: int, reason: str | Non
             "fit_score": product.get("fit_score"),
             "semantic_score": product.get("semantic_score"),
             "clearance_score": product.get("clearance_score"),
+            "intent_score": product.get("intent_score"),
+            "size_score": product.get("size_score"),
             "final_score": product.get("final_score"),
         },
         "storage_uri": product.get("storage_uri"),
