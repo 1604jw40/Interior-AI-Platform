@@ -15,7 +15,7 @@ services:
     container_name: interior_db
     environment:
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
       POSTGRES_DB: interior_assets
     volumes:
       - ./infrastructure/postgres_db/data:/var/lib/postgresql/data
@@ -114,9 +114,9 @@ services:
     environment:
       - DB_HOST=postgres_db
       - DB_USER=admin
-      - DB_PASS=secretpassword
+      - DB_PASS=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
       - DB_NAME=interior_assets
-      - OPENAI_API_KEY=${OPENAI_API_KEY} # 호스트의 환경변수 읽어오기
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ZMQ_TARGET_URL=tcp://logic-cpp:5558
     depends_on:
       - postgres_db
