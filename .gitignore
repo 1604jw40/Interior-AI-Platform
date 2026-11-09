@@ -90,7 +90,13 @@ shared/assets_3dgs/*.ply
 # shared/schema/vision_data_generated.h
 # shared/schema/InteriorPlatform/
 
-echo "infrastructure/postgres_db/data/"
+infrastructure/postgres_db/data/
 
 shared/models/*.safetensors
 shared/models/*.pth
+# Additional local-only files
+**/.vs/
+*.lscache
+.env.*
+!.env.example
+!.env.sample
